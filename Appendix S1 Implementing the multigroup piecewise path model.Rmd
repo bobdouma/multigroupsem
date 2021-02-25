@@ -1,0 +1,638 @@
+---
+title: "Appendix S1 Implementing the multigroup piecewise path model in R"
+subtitle: "Supplement to the publication: \"A multigroup extension to piecewise path-analysis\" published in Ecosphere "
+author: "Bob Douma & Bill Shipley"
+date: "24 Februari 2021"
+output:
+  bookdown::pdf_book:
+     #includes:
+    #word_document: default
+  html_document:
+    fig_caption: yes
+    fig_height: 4.5
+    fig_width: 5
+    number_sections: yes
+geometry: margin=3cm
+fontsize: 11pt
+---
+
+
+
+\newpage
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preface
+In this document we explain how multi-group testing can be combined with path-models that are expressed as Direct Acyclic Graphs (DAGs). First, we illustrate two ways to perform a  multigroup analysis in R: by using the d-sep test and the $\chi^2$ method. Next we show how different constraints can be applied to the multi-group models. 
+
+## load libraries
+
+The following libraries are needed to run the syntax below. 
+
+```{r, warnings=F,message=F}
+library(ggm) # for DAGs
+library(nlme) # mixed effect models
+library(lavaan) # classic structural equation modelling 
+library(glmmTMB) # generalized linear mixed effect models
+library(boot) # for the inverse logit
+library(betareg) # beta regression
+```
+
+
+# Illustration of the multigroup d-sep method
+
+We assume the reader that he/she is familiar with the d-sep test. We refer to the main text or to Shipley (2009) - Confimatory path analysis in a gereralized multilevel context (Ecology) for more details on the d-sep test. Take the following steps:  
+
+1.	Specify a causal hypothesis for each group in the form of a DAG.
+
+2.	Define the basis-set
+
+3.	For each group, calculate the null probability associated with the predicted independence claims. The predicted independence is calculated based on a model that assumes path coefficients equal/non-equal among groups.
+
+4.	Combine these null probability in a Fisher C statistic per group. Then add up the Fischer's C values and the k probabilities and test with Chi-square statistic.
+
+5.	From the models that are accepted, use AIC statistic to choose among models
+
+
+## Generate dataset
+```{r}
+# set random number generator to specific seed
+set.seed(11)
+```
+
+```{r}
+# number of observations
+n=200
+# make groups
+group = as.factor(rep(c(1,2),n/2))
+# generate variables
+X1 = runif(n,0,100)
+X2 = runif(n,0,100)
+X3 = c(0.5,-0.5)[group]*X1  -0.2*X2 + rnorm(n,0,1)
+X4 = c(2,4)[group]*X3 + rnorm(n,0,1)
+X5 = c(-2)*X3 + rnorm(n,0,1)
+dat = data.frame(X1,X2,X3,X4,X5,group)
+```
+
+
+## Step 1: specify causal hypothesis
+```{r}
+  # specify DAG
+  Z = DAG(X4~ X3,
+          X5 ~ X3,
+          X3 ~ X1+X2)
+```
+
+## Step 2: construct a series of independence claims
+
+Construct the basis-set.
+
+```{r}
+  bas = basiSet(Z)
+```
+ 
+The multigroup model that was used to generate the data is presented in the figure below, including their independence claims. Note that some paths have different path coefficients per group which is reflected in the independence claims. 
+```{r echo=FALSE, out.width='150%'}
+knitr::include_graphics('./indep_claims.png')
+```
+
+To test the multigroup model in R, we need a slightly different syntax for the structural equations (aka regressions) for difference between groups compared to the conventional approach.
+
+The default in R to for difference between groups is by setting one group as baseline, and the other group as difference with respect to the baseline. See example below:
+
+```{r}
+  lm.11 = lm(X2 ~ X1*group,data=dat)
+  summary(lm.11)
+
+```
+
+The conclusion of this regression is that for group 1 the slope between X1 and X2 is not different from zero and that the slopes of group 2 and group 1 are not significantly different. However, we are not interested in the difference in the slope of group 2 with respect to group 1. We are interested whether the slope between X1 and X2 for group 2 is different from zero.
+
+Whether the slope between X1 and X2 of group 2 is different from zero can be calculated by summing the baseline slope (X1) and the interaction between X1:group2, and calcuating its standard error. 
+
+
+```{r}
+# estimate of slope of group 2
+m = sum(coef(lm.11)[c(2,4)]) 
+m  # this adds up the slope for group 1 and for group 2, i.e. 
+```
+
+
+Next, extract the variance-covariance matrix of the model through `vcov()` to compute the associated significance:
+```{r}
+vc <- vcov(lm.11) 
+vc
+```
+
+Calculate the variance for the newly calculated variable through: $Var(X+Y) = Var(X)+Var(Y)+2*Cov(X,Y)$. The variance of two random variables is the sum of their variances and 2* their covariance. Sqrt to get to standard error:
+
+
+```{r}
+se = (sqrt(sum(c(vc[2,2], vc[4,4], 2*vc[2,4]))))
+se  
+tval  = m/se # t-value
+# significance of slope beteen X1 and X2 for group 2
+2 * pt(abs(tval),196,lower.tail = FALSE) 
+```
+
+Thus the relationship between X1 and X2 for group 2 is not significantly different from zero.
+
+This result can be directly obtained by using the syntax `group/x1` instead of `group*x1`:
+```{r}
+lm.22 = lm(X2 ~group/X1)
+summary(lm.22)
+```
+
+This syntax is most convenient to use for the multigroup d-sep, because the last two terms represent the probability associated with the independence claim for both groups. For example, to test the fourth independence claim:
+
+```{r}
+  # fourth independence claim
+  lm.4 = lm(X4 ~ group/X3+group/X2-1,data=dat)
+  summary(lm.4)
+```
+The path of X2 on X4 is not significant for group 1 and just significant for group 2. Note that the `-1`makes the intercept relative to zero and not to the baseline. 
+\newline
+\newline
+If you want to constrain the path from `X3` to `X4` one tests:
+```{r}
+  # test for no difference in path coefficients between groups for effect X3 on X4
+  lm.4a = lm(X4 ~ X3+group/X2-1,data=dat)
+  summary(lm.4a)
+```
+Now the `X2` and `X4` are not independent anymore, and thus this independence claim is rejected. This was not the case when allowing the path coefficient of X3 to X4 to be group specific. 
+
+Using this syntax all independence claims can be tested, and compared to a set of independence claims in which we assume no difference between groups. 
+
+## Step 3: test independence claims  
+For convenience we have assumed that the residual variance is equal among groups. However, to accomdate the fact that different groups may have different variance, one should use `gls` from the package `nlme` and specify a variance per group. This can be done through setting the `weights` argument to `varIdent(form = ~1|group)`. The p-values of the coefficients can be extracted with `summary(gls.1)$tTable`
+```{r}
+
+  # first independence claim
+  gls.1 = gls(X2~group/X1-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.1)$tTable
+ 
+  # second independence claim
+  gls.2 = gls(X5~group/X3+group/X2-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.2)$tTable
+  # no difference in path coefficients between groups for effect of x3 on x5
+  gls.2a = gls(X5~X3+group/X2-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.2a)$tTable
+  
+  # third independence claim
+  gls.3 = gls(X5 ~ group/X3+group/X1-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.3)$tTable
+  # no diffs between groups in effect of x3 on x5
+  gls.3a = gls(X5 ~ X3+group/X1-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.3a)$tTable
+  
+  # fourth independence claim
+  gls.4 = gls(X4 ~ group/X3+group/X2-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.4)$tTable
+  # no difference in path coefficients between groups for effect X3 on X4
+  gls.4a = gls(X4 ~ X3+group/X2-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.4a)$tTable
+  
+  # fifth independence claim
+  gls.5 = gls(X4 ~ group/X3+group/X1-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.5)$tTable
+  # no diffs between groups on effect of X3 on X4
+  gls.5a = gls(X4 ~ X3+group/X1-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.5a)$tTable
+  
+  # sixth independence claim
+  gls.6 = gls(X5 ~ group/X3+group/X4-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.6)$tTable
+  # no diffs between groups on effect of X3 on X5
+  gls.6a = gls(X5 ~ X3+group/X4-1,weights=varIdent(form=~1|group),data=dat)
+  summary(gls.6a)$tTable
+
+```
+
+## Step 4 combine null probabilities 
+```{r}
+
+  # make function to extract the p-values of the 
+extract.p = function(x,mod,group){
+   spec = group-1
+    if (mod =="gls"){
+      pvals <- summary(x)$tTable
+      n = nrow(pvals)
+      ps <- pvals[(n-spec):n,4]
+    } else if (mod=="lm") {
+      pvals = summary(x)$coefficients  
+      n = nrow(pvals)
+      ps = pvals[(n-spec):n,4]
+    }
+    return(ps)
+  }
+
+ extract.p(lm.11,mod="lm",group=2)
+   
+ ##### different model for different groups; no constraints on 
+ #path coefficients between groups  collect p-vales for C statistic; 
+   
+   C1=-2*sum(log(c(extract.p(gls.1,mod="gls",group=2),
+                   extract.p(gls.2,mod="gls",group=2),
+                   extract.p(gls.3,mod="gls",group=2),
+                   extract.p(gls.4,mod="gls",group=2),
+                   extract.p(gls.5,mod="gls",group=2),
+                   extract.p(gls.6,mod="gls",group=2))))
+   
+   C2=-2*sum(log(c(extract.p(gls.1,mod="gls",group=2)[2],
+                   extract.p(gls.2,mod="gls",group=2)[2],
+                   extract.p(gls.3,mod="gls",group=2)[2],
+                   extract.p(gls.4,mod="gls",group=2)[2],
+                   extract.p(gls.5,mod="gls",group=2)[2],
+                   extract.p(gls.6,mod="gls",group=2)[2])))
+   
+   # accept the model with differences between groups
+   p.diff <- 1-pchisq(C1+C2,2*2*6)
+   p.diff
+```
+
+All path coefficients equal among groups
+```{r}
+C1=-2*sum(log(c(extract.p(gls.1,mod="gls",group=2)[1],
+                extract.p(gls.2a,mod="gls",group=2)[1],
+                extract.p(gls.3a,mod="gls",group=2)[1],
+                extract.p(gls.4a,mod="gls",group=2)[1],
+                extract.p(gls.5a,mod="gls",group=2)[1],
+                extract.p(gls.6a,mod="gls",group=2)[1])))
+  
+C2=-2*sum(log(c(extract.p(gls.1,mod="gls",group=2)[2],
+                extract.p(gls.2a,mod="gls",group=2)[2],
+                extract.p(gls.3a,mod="gls",group=2)[2],
+                extract.p(gls.4a,mod="gls",group=2)[2],
+                extract.p(gls.5a,mod="gls",group=2)[2],
+                extract.p(gls.6a,mod="gls",group=2)[2])))
+
+# model with one path coefficients for all paths not accepted
+p.constrained <- 1-pchisq(C1+C2,2*12)
+p.constrained
+  
+```  
+
+Only the path coefficients of `X2` to `X3` and `X3` to `X5` constrained to be equal among groups 
+```{r}  
+    C1=-2*sum(log(c(extract.p(gls.1, mod="gls",group=2)[1],
+                    extract.p(gls.2a, mod="gls",group=2)[1],
+                    extract.p(gls.3a, mod="gls",group=2)[1],
+                    extract.p(gls.4, mod="gls",group=2)[1],
+                    extract.p(gls.5, mod="gls",group=2)[1],
+                    extract.p(gls.6, mod="gls",group=2)[1])))
+
+  C2=-2*sum(log(c(extract.p(gls.1, mod="gls",group=2)[2],
+                  extract.p(gls.2a, mod="gls",group=2)[2],
+                  extract.p(gls.3a, mod="gls",group=2)[2],
+                  extract.p(gls.4, mod="gls",group=2)[2],
+                  extract.p(gls.5, mod="gls",group=2)[2],
+                  extract.p(gls.6, mod="gls",group=2)[2])))
+  
+# model accepted
+p.partial <- 1-pchisq(C1+C2,2*12)
+p.partial
+  
+```
+
+## Step 5 compare models 
+```{r}
+  tab <- data.frame(t(c(p.diff,p.constrained,p.partial)))
+  colnames(tab) <- c("path coeff different","path coeff equal","path coeff partially equal")
+  knitr::kable(tab, booktabs = TRUE,
+      caption = 'Comparing the p-values with the path models with varying constraints'
+  )
+
+  
+
+```
+Conclusion; model with parameters free for each group is accepted, like the model with constraints on path `b` and `d`. Note that path `a` never occurs in one of the independence claims. Thus the model with constraints is purely rejected based on path `c`.  
+
+# Multigroup modelling with the Likellihood Ratio Test
+
+Shipley & Douma (2020) Generalized AIC and chi-squared statistics for path models consistent with directed acyclic graphs (Ecology) presented an alternative way to test path models expressed as DAGs. We refer to the main body of this paper, and the above mentioned paper for a detailed justification of this methodology.
+
+## Step 1: Fit the regressions
+
+In the first step the individual regressions models are fitted. Each variable is regressed against its parents (when available). 
+
+```{r}
+# group specific path coefficients
+gls.X1.diff <- gls(X1 ~ group,weights=varIdent(form=~1|group),method="ML",data=dat)
+gls.X2.diff <- gls(X2 ~ group,weights=varIdent(form=~1|group),method="ML",data=dat)
+gls.X4.diff <- gls(X4 ~ group*X3 + group, 
+                   weights=varIdent(form=~1|group),method="ML",data=dat)
+gls.X5.diff <- gls(X5 ~ group*X3 + group,
+                   weights=varIdent(form=~1|group),method="ML",data=dat)
+gls.X3.diff <- gls(X3 ~ group*X1+group*X2+group,
+                   weights=varIdent(form=~1|group),
+                   method="ML",data=dat)
+
+logLik.diff<- logLik(gls.X1.diff) + logLik(gls.X2.diff) + 
+  logLik(gls.X3.diff) + logLik(gls.X4.diff) + logLik(gls.X5.diff)
+
+AIC.diff<- AIC(gls.X1.diff) + AIC(gls.X2.diff) + 
+  AIC(gls.X3.diff) + AIC(gls.X4.diff) + AIC(gls.X5.diff)
+
+  
+# no difference between groups
+gls.X1.cons <- gls(X1 ~ group,weights=varIdent(form=~1|group),
+                   method="ML",data=dat)
+gls.X2.cons <- gls(X2 ~ group,weights=varIdent(form=~1|group),
+                   method="ML",data=dat)
+gls.X4.cons <- gls(X4 ~ X3+group,weights=varIdent(form=~1|group),
+                   method="ML",data=dat)
+gls.X5.cons <- gls(X5 ~ X3+group,weights=varIdent(form=~1|group),
+                   method="ML",data=dat)
+gls.X3.cons <- gls(X3 ~ X1+X2+group,weights=varIdent(form=~1|group),
+                   method="ML",data=dat)
+
+logLik.cons<- logLik(gls.X1.cons) + logLik(gls.X2.cons) +
+ logLik(gls.X3.cons) + logLik(gls.X4.cons) + logLik(gls.X5.cons)
+
+AIC.cons<- AIC(gls.X1.cons) + AIC(gls.X2.cons) + 
+  AIC(gls.X3.cons) + AIC(gls.X4.cons) + AIC(gls.X5.cons)
+
+# path a and c group specific
+gls.X1.partial <- gls(X1 ~ group,weights=varIdent(form=~1|group),
+                      method="ML",data=dat)
+gls.X2.partial <- gls(X2 ~ group,weights=varIdent(form=~1|group),
+                      method="ML",data=dat)
+gls.X4.partial <- gls(X4 ~ group*X3,weights=varIdent(form=~1|group),
+                      method="ML",data=dat)
+gls.X5.partial <- gls(X5 ~ X3+group,weights=varIdent(form=~1|group),
+                      method="ML",data=dat)
+gls.X3.partial <- gls(X3 ~ group*X1+X2+group,weights=varIdent(form=~1|group),
+                      method="ML",data=dat)
+
+logLik.partial<- logLik(gls.X1.partial) + logLik(gls.X2.partial) +
+  logLik(gls.X3.partial) + logLik(gls.X4.partial) + logLik(gls.X5.partial)
+
+AIC.partial<- AIC(gls.X1.partial) + AIC(gls.X2.partial) + 
+  AIC(gls.X3.partial) + AIC(gls.X4.partial) + AIC(gls.X5.partial)
+
+
+```
+
+## Step 2: Fit the saturated model
+
+In the second step a saturated path-model is fitted. This is a path model in which all variables are linked to other variables. 
+
+```{r}
+gls.X1.sat <- gls(X1 ~ group,weights=varIdent(form=~1|group), 
+                  method="ML", data=dat)
+gls.X2.sat <- gls(X2 ~ group*X1,weights=varIdent(form=~1|group), 
+                  method="ML", data=dat)
+gls.X3.sat <- gls(X3 ~ group*X1 + group*X2,
+                  weights=varIdent(form=~1|group),method="ML",data=dat)
+gls.X4.sat <- gls(X4 ~ group*X3 + group*X2 + group*X1 + group*X5, 
+                  weights=varIdent(form=~1|group),method="ML",data=dat)
+gls.X5.sat <- gls(X5 ~ group*X3 + group*X2 + group*X1, 
+                  weights=varIdent(form=~1|group),method="ML", data=dat)
+
+logLik.sat<- logLik(gls.X1.sat) + logLik(gls.X2.sat) + logLik(gls.X3.sat) + 
+  logLik(gls.X4.sat) + logLik(gls.X5.sat)
+
+
+```
+
+## Calculate the Chi-squre value and the associated p-value
+
+In the third step the logLikelihood of the hypothesized model is compared to the logLikelihood of the saturated model and with a Likelihood Ratio Test (LRT) one can test if any deviations in the logLikelihood are due to chance. This is expected when the hypothesized model was underlying the data. 
+
+```{r}
+Chi.diff <- -2*(logLik.diff - logLik.sat)
+Chi.cons <- -2*(logLik.cons - logLik.sat)
+Chi.partial <- -2*(logLik.partial - logLik.sat)
+
+p.chi.diff <- 1-pchisq(Chi.diff,df=12)
+p.chi.cons <- 1-pchisq(Chi.cons,df=16)
+p.chi.partial <- 1-pchisq(Chi.partial,df=14)
+
+p.chi.diff ; p.chi.cons ;p.chi.partial
+```
+
+# Comparison of the results with lavaan
+Fit path model and check coefficients to compare with lavaan    
+```{r}  
+
+groupsem = " 
+  X4 ~ X3
+  X5 ~ X3
+  X3 ~ X1+X2
+
+  # 
+  X1~~ 0*X2
+  X5 ~~0*X1
+  X5 ~~0*X2
+  X4 ~~0*X1
+  X4 ~~0*X2
+  X4 ~~0*X5
+"
+# all path coefficients different between groups
+sem.1 = sem(groupsem,data=dat,group="group",fixed.x=F)
+# AIC value of the model
+logLik(sem.1) ; logLik.diff
+AIC(sem.1); AIC.diff
+#parTable(sem.1)
+# Chi square value
+lavInspect(sem.1,"fit")["chisq"]; Chi.diff
+lavInspect(sem.1,"fit")["pvalue"]; p.chi.diff
+
+# all path coefficients equal between groups
+groupsem.cons = " 
+  X4 ~ X3
+  X5 ~ X3
+  X3 ~ X1 + X2
+
+  # 
+  X1 ~~0*X2
+  X5 ~~0*X1
+  X5 ~~0*X2
+  X4 ~~0*X1
+  X4 ~~0*X2
+  X4 ~~0*X5
+"
+sem.2 = sem(groupsem.cons,data=dat,group="group",group.equal="regressions",fixed.x=F)
+#summary(sem.2)
+logLik(sem.2) ; logLik.cons
+AIC(sem.2); AIC.cons
+# Chi square value
+lavInspect(sem.2,"fit")["chisq"]; Chi.cons
+lavInspect(sem.2,"fit")["pvalue"]; p.chi.cons
+
+# partial constraints
+groupsem_coef = " 
+  X4 ~ c(d1,d2)*X3
+  X5 ~ c(e,e)*X3
+  X3 ~ c(a1,a2)*X1+c(b,b)*X2
+
+  X1~~0.*X2
+  X5 ~~0*X1
+  X5 ~~0*X2
+  X4 ~~0*X1
+  X4 ~~0*X2
+  X4 ~~0*X5
+"
+sem.3 = sem(groupsem_coef,data=dat,group="group",fixed.x=F)
+logLik(sem.3) ; logLik.partial
+AIC(sem.3); AIC.partial
+# Chi square value
+lavInspect(sem.3,"fit")["chisq"]; Chi.partial
+lavInspect(sem.3,"fit")["pvalue"]; p.chi.partial
+#parTable(sem.3)
+
+# saturated model 
+groupsem_sat = " 
+  X4 ~ c(d1,d2)*X3 + c(e1,e2)*X5 + c(f1,f2)*X1 + c(g1,g2)*X2
+  X5 ~ c(m1,m2)*X3  + c(h1,h2)*X1 + c(i1,i2)*X2
+  X3 ~ c(a1,a2)*X1+c(b1,b2)*X2
+  X2 ~ c(z1,z2)*X1
+"
+sem.sat = sem(groupsem_sat,data=dat,group="group",fixed.x=F)
+logLik(sem.sat) ; logLik.sat 
+```
+
+Comparing the local estimation method, $X^2_{LML}$, with the global estimation as done in classical SEM $X^2_{GML}$. Also qualitatively, the results are similar to the d-sep test. The $\Delta X^2$ is calculated by subtracting the logLikelihood of the hyothesized model from the logLikelihood of the saturated model.  
+
+```{r,echo=FALSE}
+tab <- data.frame(
+  "Chi_sq_local"=c(logLik.diff,logLik.cons,logLik.partial,logLik.sat),
+   "Chi_sq_lavaan"=c(logLik(sem.1),logLik(sem.2),logLik(sem.3),logLik(sem.sat)),
+  "delta Chi_sq_lavaan"=c(lavInspect(sem.1,"fit")["chisq"],
+                          lavInspect(sem.2,"fit")["chisq"],lavInspect(sem.3,"fit")["chisq"],"0"),
+  "df" = c(12,16,14,"NA"),
+  "p_val_local"=c(p.chi.diff,p.chi.cons,p.chi.partial,"NA"))
+ row.names(tab) = c("no constraints","all constraints","partial constraints","saturated model")
+  
+   knitr::kable(tab, booktabs = TRUE,
+       caption = 'Comparing the statistics of the local Chi-square method $X_{L ML}^{2}$ and the global statistic $X_{G ML}^{2}$ as fitted by `lavaan`. The $\\Delta X^2$ is calculated by subtracting the logL of the hypothesized model from the logL of the saturated model',
+       col.names = c("$\\text{log}L_{local}$","$\\text{log}L_{global}$","$\\Delta X^2$","$\\Delta df$","$p_{ML}$"),escape=F)
+```
+
+
+
+# Model specification for various constraints (path coefficient, intercept, variance etc.)
+
+For the d-sep test it is most convenient to write the group model syntax as: group/X, but for the $\chi^{2}_{LML}$ one can also use group*X, as you collect the likelihood of the fitted model and not the p-values in the first place. Always check whether all intercepts and interaction terms are present in the summary statement as you intended to be. 
+
+## Fixing path coefficients across groups
+Below we fix the path from `X3` to `X4` to be eqaul across groups. Thus we change the `group/X3` into `X3`. 
+```{r}
+  gls.path.fixed = gls(X4 ~ X3+group/X2-1,weights=varIdent(form=~1|group),
+                       data=dat)
+  summary(gls.path.fixed)$tTable
+```
+
+## Fixing path coefficients to a predefined value
+To fix the path coefficient to a preset value, one use `offset`. One can fix different path coefficients for different groups.
+```{r}
+gls.path.set = gls(X4 ~ offset(3*X3)+group/X2-1,weights=varIdent(form=~1|group),
+                   data=dat)
+summary(gls.path.set)$tTable
+
+gls.path.set1 = gls(X4 ~ offset(c(2.0,4.0)[group]*X3)+group/X2-1,
+                    weights=varIdent(form=~1|group),data=dat)
+summary(gls.path.set1)$tTable
+
+```
+
+## Fixing the intercept
+One can also constrain the intercept to be equal among groups. First the unconstrained syntax is shown and below the constrained. In the first output you see the terms `group1` and `group2` which represent the group-specific intercepts. In the second `lm.4.int` you see `Intercept` reported which is the intercept across groups. To have a model without intercept add `-`1`.
+```{r}
+    gls.intercept.free = gls(X4 ~ group/X3+group/X2-1,weights=varIdent(form=~1|group),
+                             data=dat)
+    summary(gls.intercept.free)$tTable
+    
+    gls.intercept.fixed = gls(X4 ~ group/X3+group/X2-group,
+                              weights=varIdent(form=~1|group),data=dat)
+    summary(gls.intercept.fixed)$tTable
+    
+```
+
+## Fixing path coefficients for >2 groups
+```{r}
+set.seed(101)
+n=200
+# make four groups
+group4 = as.factor(rep(c(1,2,3,4),n/4))
+X1_4 = runif(n,0,100)
+X2_4 = runif(n,0,100)
+X3_4 = c(0.5,0.5,-0.5,-0.5)[group4]*X1  -0.2*X2 + rnorm(n,0,1)
+X4_4 = c(1,2,3,4)[group4]*X3 + rnorm(n,0,1)
+X5_4 = c(-2,-2,-2,-2.)*X3 + rnorm(n,0,1)
+dat4 = data.frame(X1_4,X2_4,X3_4,X4_4,X5_4,group4)
+
+gls.2_4 = gls(X5_4~group4/X3_4+group4/X2_4,data=dat4,weights=varIdent(form=~1|group))
+summary(gls.2_4)
+```
+As you can see in the summary output, the last four coefficients and p-values represent the independence claims for each of the four groups. 
+
+## Fixing the variance
+```{r}
+    gls.variance.free = gls(X4 ~ group/X3+group/X2-1, 
+                            weights=varIdent(form=~1|group),data=dat)
+    summary(gls.variance.free)
+    gls.variance.fixed = gls(X4 ~ group/X3+group/X2-group,data=dat)
+    summary(gls.variance.fixed)
+    #or 
+    lm.variance.fixed = lm(X4 ~ group/X3+group/X2-group,data=dat)
+    summary(lm.variance.fixed)
+    
+```
+
+# Applying constraints to non-normally distributed variables or nested designs
+
+## Generate data
+```{r}
+set.seed(101)
+n=200
+# make groups
+group = as.factor(rep(c(1,2),n/2))
+# generate variables
+X1 = runif(n,0,100)
+X2 = runif(n,0,100)
+X3 = c(0.5,-0.5)[group]*X1  -0.2*X2 + rnorm(n,0,1)
+X4 = c(2,4)[group]*X3 + rnorm(n,0,1)
+# Generate poisson distributed data
+X5.p = rpois(n,exp(-0.02*X3))
+# Generate beta distributed data
+phi <- 200
+prob <- inv.logit(c(-0.038)*X3)
+X5.b = rbeta(n,shape1=prob*phi,shape2=(1-prob)*phi)
+dat.non = data.frame(X1,X2,X3,X4,X5.p,X5.b,group)
+```
+
+## Non-normal distributions
+When  modelling a non-normal distribution, one should consider to make the dispersion parameter group specific. This can for example be done in case of the beta distribution by making the $\phi$ group specific. For the negative binomial, the dispersion parameter $k$ could be modelled group specific. However, there is no pre-canned solution in R to my knowledge. One could program this yourself using the approach advocated in Bolker's Ecological Models and Data in R. The application of other constraints (intercepts etc.) can be done in the same way as for the linear models with normal distribution.  
+```{r}
+# with glm
+glm.p = glm(X5.p~group/X3+group/X4-1,family="poisson",data=dat.non)
+summary(glm.p)
+
+glm.beta = betareg(X5.b~group/X3+group/X4-1 | group,data=dat.non)
+summary(glm.beta)
+``` 
+
+## Hierarchical designs
+To both allow for a nested design and a group specific variance one should use the package `nlme`. If you want to make the dispersion parameter group specific, the package `glmmTMB` offers most opportunities to do so. 
+
+```{r}
+dat$mix = sample((rep(c(1:4),each=25)))
+
+lm.w2 = lme(X4~group/X3+group/X1, random=~1|mix,
+            weights=varIdent(form=~1|group),data=dat)
+
+lm.w2.alt = lme(X4~group*X3+group*X1, random=~1|mix,
+            weights=varIdent(form=~1|group),data=dat)
+
+
+summary(lm.w2)
+
+dat.non$mix = as.factor(sample((rep(c(1:4),each=25))))
+
+glmm.beta = glmmTMB(X5.b ~ group/X3-1  + (1|mix),dispformula = ~group, 
+                    family="beta_family" ,data=dat.non)
+summary(glmm.beta)
+
+```
